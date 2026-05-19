@@ -42,4 +42,4 @@ class HydrationManager:
                     "Your water bottle is looking empty. Please refill it."
                 )
 
-        return time_since_drink
+        return time_since_drink         

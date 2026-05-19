@@ -6,7 +6,7 @@ from ultralytics import YOLO
 class PoseDetector:
     def __init__(self):
         # Load the Pose-specific Nano model (very fast on CPU)
-        # It will download 'yolov8n-pose.pt' automatically on first run
+        # It will download 'yolov8n-pose.onnx' automatically on first run
         self.model = YOLO('yolov8n-pose.pt')
         self.baseline_shoulder_y = None
 
