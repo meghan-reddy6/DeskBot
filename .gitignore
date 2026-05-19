@@ -4,3 +4,4 @@ dbot/
 venv/
 .env/
 *.pt
+*.onnx
