@@ -1,5 +1,13 @@
 # Bottle/Person Pose & Hydration Detector
 
+Version: 2.0
+
+Changelog (v2.0):
+
+- Updated `README.md` with clearer setup, run, and troubleshooting steps.
+- Clarified available modules and files in the repository.
+- Documented usage for `main.py`, `pose_detector.py`, and `bottle_detector.py`.
+
 Small project for detecting people, bottles, and poses using YOLOv8 and utilities in this repository.
 
 ## Contents
