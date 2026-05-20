@@ -5,3 +5,4 @@ venv/
 .env/
 *.pt
 *.onnx
+*.db
