@@ -82,19 +82,24 @@ def main():
     video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
     video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
     
-    # Instantiate the process-protected alert notifier
     alert_notifier = NotificationManager()
     hydration_handler = HydrationManager(alert_notifier)
     
     background_processor = threading.Thread(target=asynchronous_inference_worker, daemon=True)
     background_processor.start()
     
+    # Core Engine Core Timestamps
     sitting_epoch = time.time()
     standing_epoch = None
+    
+    # State Duration Accumulators
     accumulated_sitting_sec = 0
+    accumulated_standing_sec = 0
     accumulated_eye_strain_sec = 0
     
+    # Condition Latch Flags
     is_currently_slouching = False
+    break_completion_alert_fired = False
     
     previous_frame_timestamp = time.time()
     last_db_commit_timestamp = time.time()
@@ -113,18 +118,23 @@ def main():
             active_metrics = network_telemetry.copy()
             local_overlays = list(shared_overlay_elements)
 
+        # 1. Render base model overlay landmarks (Skeletons/Bounding Boxes)
         for item in local_overlays:
             if item[0] == "circle":
                 cv2.circle(current_frame, item[1], item[2], item[3], item[4])
             elif item[0] == "rect":
                 cv2.rectangle(current_frame, item[1], item[2], item[3], item[4])
 
+        # 2. Dual Accumulator Posture State Engine
         if active_metrics["is_sitting"]:
             standing_epoch = None
+            accumulated_standing_sec = 0
+            break_completion_alert_fired = False
+            
             accumulated_sitting_sec = current_epoch - sitting_epoch
             
             if accumulated_sitting_sec > config.SITTING_TIME_THRESHOLD:
-                alert_notifier.send_alert("posture", "Posture Alert", "Prolonged sitting detected.")
+                alert_notifier.send_alert("posture", "Posture Alert", "Prolonged sitting detected. Please stand up!")
                 
             if active_metrics["is_slouching"]:
                 if not is_currently_slouching:
@@ -136,10 +146,22 @@ def main():
             is_currently_slouching = False
             if standing_epoch is None: 
                 standing_epoch = current_epoch
-            if current_epoch - standing_epoch > config.STAND_RESET_THRESHOLD:
+                
+            accumulated_standing_sec = current_epoch - standing_epoch
+            
+            if accumulated_standing_sec >= config.STAND_RESET_THRESHOLD:
+                if not break_completion_alert_fired:
+                    alert_notifier.send_alert(
+                        "break_complete", 
+                        "Break Completed", 
+                        "Excellent job! You have stood long enough. You can sit down now."
+                    )
+                    break_completion_alert_fired = True
+                
                 sitting_epoch = current_epoch
                 accumulated_sitting_sec = 0
 
+        # 3. Eye Strain Monitoring Engine
         if active_metrics["is_sitting"] and active_metrics["is_gazing_screen"]:
             accumulated_eye_strain_sec += loop_duration
             if accumulated_eye_strain_sec > config.EYE_STRAIN_THRESHOLD_SEC:
@@ -149,10 +171,12 @@ def main():
 
         hydration_handler.update(active_metrics["is_drinking"], active_metrics["vessel_detected"], active_metrics["water_level_pct"])
 
+        # 4. Telemetry Log Handler
         if current_epoch - last_db_commit_timestamp > 5.0:
             append_telemetry(accumulated_sitting_sec, active_metrics["is_slouching"], accumulated_eye_strain_sec, active_metrics["water_level_pct"], active_metrics["current_volume_ml"])
             last_db_commit_timestamp = current_epoch
 
+        # 5. Clean Dashboard Generator Layer (Passes timers natively to avoid layout collisions)
         calculated_fps = 1.0 / loop_duration if loop_duration > 0 else 0.0
         current_frame = draw_dashboard(
             current_frame, accumulated_sitting_sec, accumulated_eye_strain_sec,
@@ -161,20 +185,29 @@ def main():
             active_metrics["current_volume_ml"], calculated_fps
         )
 
+        # 6. Integrated Non-Overlapping Status Information Banners (Safe Corner Placements)
+        if not active_metrics["is_sitting"]:
+            stand_min, stand_sec = divmod(int(accumulated_standing_sec), 60)
+            target_min, target_sec = divmod(int(config.STAND_RESET_THRESHOLD), 60)
+            color = (0, 255, 0) if break_completion_alert_fired else (0, 255, 255)
+            status_str = "BREAK SATISFIED" if break_completion_alert_fired else "STAND BREAK ACTIVE"
+            
+            # Positioned lower left safely below standard header metrics panel
+            cv2.putText(current_frame, f"{status_str}: {stand_min:02d}:{stand_sec:02d}/{target_min:02d}:{target_sec:02d}", (20, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+
+        # Bottom right anchoring for ergonomics alert indicators
         if active_metrics["is_slouching"]:
-            cv2.putText(current_frame, "POOR POSTURE DETECTED", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        if accumulated_eye_strain_sec > (config.EYE_STRAIN_THRESHOLD_SEC * 0.75):
-            cv2.putText(current_frame, "HIGH EYE FATIGUE RISK", (20, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 140, 255), 2)
+            cv2.putText(current_frame, "[WARN: POOR POSTURE]", (360, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+        elif accumulated_eye_strain_sec > (config.EYE_STRAIN_THRESHOLD_SEC * 0.75):
+            cv2.putText(current_frame, "[WARN: EYE STRAIN RISK]", (340, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2, cv2.LINE_AA)
 
         cv2.imshow("DeskBot Workspace Monitor", current_frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): 
             break
 
-    # Clean execution exit portal
     video_capture.release()
     cv2.destroyAllWindows()
     alert_notifier.shutdown()
 
 if __name__ == "__main__":
-    # This guard is required for multiprocessing stability on laptop environments
     main()

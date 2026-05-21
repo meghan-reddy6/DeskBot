@@ -15,10 +15,10 @@ SMOOTHING_WINDOW_SIZE = 5           # History frame count to calculate moving av
 POSTURE_CONFIDENCE_THRESHOLD = 0.40 # Confidence cutoff to prevent flashing skeletons
 
 # Ergonomics & Biomechanical Thresholds
-SITTING_TIME_THRESHOLD = 45 * 60      
+SITTING_TIME_THRESHOLD = 1 * 60      
 STAND_RESET_THRESHOLD = 60            
 SLOUCH_ANGLE_THRESHOLD = 145          
-EYE_STRAIN_THRESHOLD_SEC = 20 * 60    
+EYE_STRAIN_THRESHOLD_SEC = 1 * 60    
 
 # Hydration Tracking
 HYDRATION_REMINDER_INTERVAL = 30 * 60 
