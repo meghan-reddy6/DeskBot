@@ -1,0 +1,15 @@
+[project]
+name = "pose"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mediapipe>=0.10.0",
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "plyer>=2.1.0",
+    "pyttsx3>=2.90",
+    "scipy>=1.10.0",
+    "ultralytics>=8.0.0",
+]

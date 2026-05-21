@@ -1,127 +1,168 @@
-# Bottle/Person Pose & Hydration Detector
+# DeskBot — Bottle/Person Pose & Hydration Detector
 
-Version: 2.0
+Short tagline: Real-time posture, gaze and bottle detection with hydration reminders and telemetry.
 
-Changelog (v2.0):
-
-- Updated `README.md` with clearer setup, run, and troubleshooting steps.
-- Clarified available modules and files in the repository.
-- Documented usage for `main.py`, `pose_detector.py`, and `bottle_detector.py`.
-
-Small project for detecting people, bottles, and poses using YOLOv8 and utilities in this repository.
-
-## Contents
-
-- **Overview:** what this repo does
-- **Requirements:** Python and packages
-- **Setup:** create/activate virtualenv and install deps
-- **Run:** commands to start the app
-- **Configuration:** key files to edit
-- **Troubleshooting:** common issues and fixes
+---
 
 ## Overview
 
-This project uses YOLOv8 models to detect bottles and human poses and runs utilities in the repository ([main.py](main.py), [pose_detector.py](pose_detector.py), [bottle_detector.py](bottle_detector.py), [hydration_manager.py](hydration_manager.py), [notification_manager.py](notification_manager.py)). Put model files in the project root and run `main.py` to start detection.
+DeskBot is a local, Python-based utility that uses YOLOv8 models to detect people, estimate pose landmarks, detect drinking behavior and water-vessel fill level, and provide ergonomic and hydration notifications. It runs locally with camera input, logs telemetry to a local SQLite DB, and issues desktop and voice alerts.
 
-## Requirements
+Target users: hobbyists, researchers, and developers building desktop ergonomic/hydration assistants or demos for computer-vision based user monitoring.
 
-- Windows (tested)
-- Python 3.10+ (3.12 compatible)
-- A working webcam or video source
-- The file [requirements.txt](requirements.txt) lists Python dependencies. Install them into a dedicated virtual environment.
-- Optional: GPU acceleration (install a CUDA/CuDNN-compatible `torch` build).
+## Features
 
-Files of note:
+- Real-time human pose landmark extraction (Ultralytics YOLO pose model).
+- Posture state detection (sitting vs away, slouch detection).
+- Gaze-screen estimation (simple nose position heuristic).
+- Drinking detection by proximity of wrist to nose.
+- Bottle/cup detection with water-level estimation (pixel-edge analysis inside detected bounding box).
+- Hydration reminders and low-water alerts via voice (pyttsx3 subprocess) and desktop notifications (plyer).
+- Asynchronous AI inference worker to keep UI responsive.
+- Local telemetry storage (`deskbot_metrics.db`) for session analytics.
 
-- [main.py](main.py)
-- [pose_detector.py](pose_detector.py)
-- [bottle_detector.py](bottle_detector.py)
-- [requirements.txt](requirements.txt)
-- `yolov8n-pose.pt` and `yolov8n.pt` (model weights) — keep them in the project root.
+## Tech Stack
 
-## Setup (recommended)
+- Language: Python 3.12+ (see `pyproject.toml`) — the code is compatible with Python 3.10+ in practice.
+- Computer Vision: OpenCV (`opencv-python`), NumPy
+- Models / Inference: Ultralytics YOLO (via the `ultralytics` package)
+- Optional: ONNX/`onnxruntime` (ONNX model handling is referenced but not required by the core path)
+- Data storage: SQLite (local file)
+- Notifications: `plyer` (desktop) and `pyttsx3` (voice, run in isolated subprocess)
 
-1. Install Python 3.10+ from python.org if you don't have it.
-2. (Optional) Use the included virtual environment located at `dbot/` or create a new one.
+There is no frontend or REST API in this repository; the app is a single-process desktop/CLI utility that displays a live OpenCV window.
 
-PowerShell (activate included `dbot` venv):
+## Architecture & Data Flow
 
-```powershell
-.\dbot\Scripts\Activate.ps1
-# or: .\dbot\Scripts\activate
+High level components:
+
+- `main.py` — application entry point. Captures camera frames, spawns the asynchronous inference thread, merges overlays, draws dashboard, and manages high-level timers & alerts.
+- `pose_detector.py` (`UnifiedEdgeDetector`) — loads an Ultralytics YOLO pose model, extracts landmarks, computes posture metrics, detects drinking gestures, and estimates water level inside detected vessel bounding boxes.
+- `bottle_detector.py` (`BottleDetector`) — separate detector wrapper (note: references a config variable `YOLO_MODEL_PATH` which is not defined in `config.py`; see notes below).
+- `hydration_manager.py` — manages hydration timing and fires hydration-related alerts.
+- `notification_manager.py` — emits desktop notifications and manages a separate voice subprocess to run `pyttsx3` safely.
+- `utils.py` — telemetry DB setup (`deskbot_metrics.db`) and dashboard drawing.
+
+Data flow summary:
+
+1. `main.py` captures frames from the camera and pushes a copy to the inference thread under a lock.
+2. `UnifiedEdgeDetector.process_frame` runs the YOLOv8 pose/detection model, returns posture flags, vessel detection, water level estimates and overlay primitives.
+3. `main.py` consumes the returned metrics, updates accumulators (sitting/standing, eye strain), calls `HydrationManager.update`, and triggers `NotificationManager.send_alert` when thresholds are met.
+4. Telemetry is periodically appended to the local SQLite DB by `utils.append_telemetry`.
+
+## Installation & Setup
+
+Prerequisites
+
+- Python 3.12+ recommended (the `pyproject.toml` specifies `requires-python = ">=3.12"`).
+- A working camera or video source.
+
+Clone the repo
+
+```bash
+git clone <repository-url>
+cd pose
 ```
 
-Command Prompt (activate):
+Create a virtual environment and install dependencies
 
-```cmd
-dbot\Scripts\activate.bat
-```
-
-If you prefer a new venv:
+PowerShell example:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-3. Install dependencies:
-
-```powershell
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Note: If you want GPU acceleration, install an appropriate `torch` wheel for your CUDA version before or after the above step. See the `torch` installation instructions on the PyTorch website for the correct command for your GPU/OS.
+Notes:
 
-## Model files
+- `requirements.txt` already lists `ultralytics`, `opencv-python`, `numpy`, `mediapipe`, `pyttsx3`, `plyer`, and `scipy`.
+- If you require GPU acceleration, install a CUDA-compatible `torch` wheel before installing other dependencies per the PyTorch install guide.
 
-Place these model files in the project root (they are already present if you copied them here):
+Model files
 
-- `yolov8n-pose.pt` — pose model
-- `yolov8n.pt` — detection/classification model
+Place model files in the project root. The project expects at least the pose model named in `config.py`:
 
-If you do not have them, download the correct YOLOv8 weights and name them accordingly.
+- `yolov8n-pose.pt` — referenced by `config.YOLO_POSE_MODEL` and loaded by `pose_detector.py`.
 
-## Run the app
+`bottle_detector.py` references `config.YOLO_MODEL_PATH` for a detection model; this variable is not defined in `config.py` in the current code — if you plan to use `BottleDetector`, add `YOLO_MODEL_PATH = "yolov8n.pt"` (or another detection model path) to `config.py`.
 
-Basic run (from project root):
+## Project Structure
+
+- [main.py](main.py) — entrypoint, UI loop, inference orchestration
+- [config.py](config.py) — application configuration values and thresholds
+- [pose_detector.py](pose_detector.py) — UnifiedEdgeDetector implementation (YOLO pose + vessel analysis)
+- [bottle_detector.py](bottle_detector.py) — BottleDetector class (separate wrapper)
+- [hydration_manager.py](hydration_manager.py) — hydration reminder logic
+- [notification_manager.py](notification_manager.py) — desktop + voice notifications (multiprocessing)
+- [utils.py](utils.py) — telemetry DB and dashboard renderer
+- [requirements.txt](requirements.txt) — Python dependencies
+- [pyproject.toml](pyproject.toml) — project metadata & declared dependencies
+- model files: `yolov8n-pose.pt`, `yolov8n.pt` (if used), `yolov8n-pose.onnx` (optional)
+
+## Configuration
+
+Configuration is performed via `config.py`. Important settings include:
+
+- `CAMERA_INDEX` — camera device index (default 0)
+- `FRAME_WIDTH`, `FRAME_HEIGHT` — capture resolution
+- `YOLO_POSE_MODEL` — path to the Ultralytics pose `.pt` file
+- `BOTTLE_CLASS_ID`, `CUP_CLASS_ID` — expected class IDs for vessel detection
+- `SITTING_TIME_THRESHOLD`, `STAND_RESET_THRESHOLD`, `EYE_STRAIN_THRESHOLD_SEC` — ergonomics thresholds
+- `HYDRATION_REMINDER_INTERVAL`, `LOW_WATER_THRESHOLD_PERCENT`, `STANDARD_VESSEL_CAPACITY_ML` — hydration settings
+- `ENABLE_VOICE_ALERTS`, `ENABLE_DESKTOP_ALERTS`, `NOTIFICATION_COOLDOWN` — notification controls
+
+If you prefer to use environment variables, implement a small loader to populate `config.py` from `os.environ` (not currently implemented).
+
+## Usage
+
+Start the app (project root):
 
 ```powershell
 python main.py
 ```
 
-If you need to run a specific module for debugging, you can call it directly, e.g.:
+Behavior overview:
+
+- On launch the system calibrates posture for a few seconds; it prints "Calibration Successful!" when done.
+- The overlay shows detected landmarks, vessel bounding boxes, session timers and metrics.
+- Alerts will be shown on-screen and spoken (if `ENABLE_VOICE_ALERTS=True`).
+
+Debugging individual components:
 
 ```powershell
-python pose_detector.py
-python bottle_detector.py
+python pose_detector.py        # Runs the detector code path (may require small wrapper)
+python bottle_detector.py      # Runs the bottle detector class logic (requires YOLO_MODEL_PATH in config)
 ```
 
-## Configuration
+## API / Endpoints
 
-- [config.py](config.py) holds configurable parameters (camera index, thresholds, file paths). Edit it to tune behavior.
-- [main.py](main.py) is the primary entry point and wires detectors, managers, and notifications together.
+This repository does not expose HTTP APIs or an external service interface — it is a local application.
+
+## Environment Variables
+
+There are no required `.env` environment variables out of the box. The primary runtime configuration uses `config.py`. If you convert to `.env`, include equivalents for the `config.py` keys listed in the Configuration section.
 
 ## Troubleshooting
 
-- Missing packages after `pip install -r requirements.txt`: ensure your venv is activated and you used the correct Python interpreter.
-- Model files not found: confirm `yolov8n-pose.pt` and `yolov8n.pt` exist in the project root.
-- Camera not detected: check Windows privacy settings and camera index in [config.py](config.py). Try different camera indices (0, 1, 2).
-- GPU/torch errors: install the correct `torch` for your CUDA version; if unsure, try CPU-only `pip install torch --index-url https://download.pytorch.org/whl/cpu` or rely on the `requirements.txt` defaults.
-- Permission errors when opening camera or saving files: run the terminal as Administrator or adjust file paths in [config.py](config.py) to a writable folder.
+- Models not found: ensure `yolov8n-pose.pt` (and any other model paths) are present in the project root and match names referenced in `config.py`.
+- `bottle_detector.py` fails to load: add `YOLO_MODEL_PATH = "yolov8n.pt"` to `config.py` or update the module to use `YOLO_POSE_MODEL`.
+- Camera not accessible: check camera permissions, try different `CAMERA_INDEX` values, or supply a video file path in place of `cv2.VideoCapture(config.CAMERA_INDEX)`.
+- pyttsx3 audio errors or device locks: the voice worker isolates `pyttsx3` into a subprocess to reduce lockups. If audio initialization fails, test `pyttsx3` separately in an interactive session.
+- Torch / CUDA errors: install a `torch` build that matches your CUDA driver or use CPU-only builds for compatibility.
 
-If you encounter specific tracebacks, copy the error into an issue or contact the maintainer (see below).
+## Future Improvements
 
-## Tests and Development
+- Add CLI flags for overriding `config.py` values at runtime (model paths, device, source).
+- Consolidate model-loading paths to avoid undefined config keys (`YOLO_MODEL_PATH`).
+- Add automated unit tests for `hydration_manager.py` and detector wrappers.
+- Create an optional headless mode to run on servers (no OpenCV GUI) and output telemetry to a remote store.
+- Add Dockerfile and instructions for lightweight deployment.
+- Implement an ONNX-first inference path using `onnxruntime` for platforms without PyTorch.
 
-- This repository does not include automated tests. For local development, run individual modules and validate behavior from logs.
+## License
 
-## Next steps / Suggestions
+No license file detected in repository. Suggested: add an open-source license such as MIT if you want to permit reuse.
 
-- Add unit tests for detection and manager logic.
-- Add CLI flags to `main.py` for selecting models, camera, or running a dry-run.
-- Add a dockerfile or cross-platform instructions if you want non-Windows support.
-
-## License & Contact
-
-This README is provided as-is. For questions or to contribute, open an issue or contact the repository owner.
+---

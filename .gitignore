@@ -1,8 +1,9 @@
+dbot/
+.venv/
 __pycache__/
 *.pyc
-dbot/
-venv/
-.env/
-*.pt
-*.onnx
+*.pyo
 *.db
+uv.lock
+*.pt
+*onnx
