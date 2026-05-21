@@ -47,7 +47,13 @@ def asynchronous_inference_worker():
                 if engine.neck_ratio_history and engine.nose_y_history:
                     calibration_ratios.append(engine.neck_ratio_history[-1])
                     calibration_noses.append(engine.nose_y_history[-1])
+                
+                with thread_lock:
+                    shared_overlay_elements = overlays
+                    network_telemetry["is_sitting"] = True
+                    network_telemetry["is_slouching"] = False
                 continue
+                
             elif not engine.calibrated and calibration_ratios:
                 engine.baseline_neck_ratio = float(np.mean(calibration_ratios))
                 engine.baseline_nose_y = float(np.mean(calibration_noses))
@@ -76,6 +82,7 @@ def main():
     video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
     video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
     
+    # Instantiate the process-protected alert notifier
     alert_notifier = NotificationManager()
     hydration_handler = HydrationManager(alert_notifier)
     
@@ -86,6 +93,8 @@ def main():
     standing_epoch = None
     accumulated_sitting_sec = 0
     accumulated_eye_strain_sec = 0
+    
+    is_currently_slouching = False
     
     previous_frame_timestamp = time.time()
     last_db_commit_timestamp = time.time()
@@ -113,11 +122,18 @@ def main():
         if active_metrics["is_sitting"]:
             standing_epoch = None
             accumulated_sitting_sec = current_epoch - sitting_epoch
+            
             if accumulated_sitting_sec > config.SITTING_TIME_THRESHOLD:
                 alert_notifier.send_alert("posture", "Posture Alert", "Prolonged sitting detected.")
+                
             if active_metrics["is_slouching"]:
-                alert_notifier.send_alert("slouch", "Ergonomics Check", "Slouching behavior detected.")
+                if not is_currently_slouching:
+                    alert_notifier.send_alert("slouch", "Ergonomics Check", "Slouching behavior detected.")
+                    is_currently_slouching = True
+            else:
+                is_currently_slouching = False
         else:
+            is_currently_slouching = False
             if standing_epoch is None: 
                 standing_epoch = current_epoch
             if current_epoch - standing_epoch > config.STAND_RESET_THRESHOLD:
@@ -154,8 +170,11 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord('q'): 
             break
 
+    # Clean execution exit portal
     video_capture.release()
     cv2.destroyAllWindows()
+    alert_notifier.shutdown()
 
 if __name__ == "__main__":
+    # This guard is required for multiprocessing stability on laptop environments
     main()
