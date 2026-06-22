@@ -360,8 +360,9 @@ class UnifiedEdgeDetector:
                             raw_metrics["is_sitting"] = False
                             
                         # 4. ACCURATE SLOUCH CONTROLLER
-                        current_nose_to_box_ratio = abs(nose_y - by1) / max(current_height, 1.0)
-                        if raw_metrics["is_sitting"] and current_nose_to_box_ratio > (self.base_nose_to_box * 1.15):
+                        # Slouching is biomechanically defined by the compression of the neck/spine.
+                        # We trigger a slouch warning if the torso ratio drops by >15% below the healthy baseline.
+                        if raw_metrics["is_sitting"] and current_torso_ratio < (self.base_torso_ratio * 0.85):
                             raw_metrics["is_slouching"] = True
                     else:
                         # Mode B (Clipping/Close-up Fallback)

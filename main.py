@@ -187,6 +187,7 @@ def main():
                     display_frame = draw_dashboard(
                         annotated_frame, 
                         accumulated_sitting_sec, 
+                        accumulated_standing_sec,
                         accumulated_eye_strain_sec,
                         metrics["is_sitting"], 
                         metrics["is_slouching"],

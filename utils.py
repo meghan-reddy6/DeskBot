@@ -114,7 +114,7 @@ class TelemetryLogger:
                 conn.close()
 
 
-def draw_dashboard(frame, sitting_time, eye_strain_time, is_sitting, is_slouching, vessel_type, water_level, volume_ml, video_fps):
+def draw_dashboard(frame, sitting_time, standing_time, eye_strain_time, is_sitting, is_slouching, vessel_type, water_level, volume_ml, video_fps):
     """Renders the workspace analytics layer with a color-coded visual HUD."""
     overlay = frame.copy()
     # Darker, larger backing box for HUD to ensure high contrast
@@ -139,8 +139,17 @@ def draw_dashboard(frame, sitting_time, eye_strain_time, is_sitting, is_slouchin
     cv2.circle(frame, (120, 35), 8, color, -1)
     cv2.putText(frame, status_text, (140, 40), font, 0.55, color, 1)
 
-    # Session Time indicator directly below posture
-    cv2.putText(frame, f"Session: {sitting_time // 60:.0f}m {sitting_time % 60:.0f}s", (20, 70), font, 0.5, (200, 200, 200), 1)
+    # Session / Break Time indicator directly below posture
+    if not is_sitting:
+        from config import STAND_RESET_THRESHOLD_SEC
+        stand_min, stand_sec = divmod(int(standing_time), 60)
+        target_min, target_sec = divmod(int(STAND_RESET_THRESHOLD_SEC), 60)
+        if standing_time >= STAND_RESET_THRESHOLD_SEC:
+            cv2.putText(frame, f"Break: COMPLETE {stand_min:02d}:{stand_sec:02d}", (20, 70), font, 0.5, (0, 255, 0), 1)
+        else:
+            cv2.putText(frame, f"Break: {stand_min:02d}:{stand_sec:02d} / {target_min:02d}:{target_sec:02d}", (20, 70), font, 0.5, color, 1)
+    else:
+        cv2.putText(frame, f"Session: {sitting_time // 60:.0f}m {sitting_time % 60:.0f}s", (20, 70), font, 0.5, (200, 200, 200), 1)
 
     # --- 2. Eye Strain Status LED ---
     from config import EYE_STRAIN_LIMIT_SEC
