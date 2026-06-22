@@ -1,64 +1,43 @@
-# ==========================================
-# STAGE 1: Builder / Dependency Compilation
-# ==========================================
 FROM python:3.12-slim AS builder
 
-# Optimize Python runtime for containerization
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-WORKDIR /app
+WORKDIR /install
 
-# Install system build dependencies required for compiling certain python packages
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Establish an isolated virtual environment
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+RUN pip install --prefix=/install --no-warn-script-location -r requirements.txt
 
-# Upgrade pip and install core dependencies (onnxruntime, opencv-python, etc.)
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+FROM python:3.12-slim AS runner
 
-# ==========================================
-# STAGE 2: Minimal Runtime Environment
-# ==========================================
-FROM python:3.12-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install critical runtime libraries for OpenCV and GStreamer (Qualcomm/Rubik Pi support)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system-level multimedia dependencies for OpenCV & audio handling
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly \
-    gstreamer1.0-libav \
-    gstreamer1.0-tools \
-    && rm -rf /var/lib/apt/lists/*
+    libgstreamer1.0-0 \
+    alsa-utils && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy the compiled virtual environment from the builder stage
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Copy pre-compiled packages from the builder stage
+COPY --from=builder /install /usr/local
 
-# Copy the core python application scripts
-COPY *.py ./
+# Copy application layers
+COPY . /app/
 
-# Copy the pre-exported ONNX edge model
-# (Ensure yolov8n-pose.onnx is present in the build context directory)
-COPY yolov8n-pose.onnx ./
-
-# Create data directory for named volume persistence mapping
+# Dedicated persistence volume directory for SQLite telemetry
 RUN mkdir -p /app/data
 
-# Launch the Daemon Entrypoint
 CMD ["python", "main.py"]

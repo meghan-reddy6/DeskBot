@@ -115,29 +115,71 @@ class TelemetryLogger:
 
 
 def draw_dashboard(frame, sitting_time, eye_strain_time, is_sitting, is_slouching, vessel_type, water_level, volume_ml, video_fps):
-    """Renders the workspace analytics layer onto the display frame."""
+    """Renders the workspace analytics layer with a color-coded visual HUD."""
     overlay = frame.copy()
-    # Draw transparent backing box for metrics readable UI
-    cv2.rectangle(overlay, (10, 10), (380, 200), (20, 20, 20), -1)
-    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+    # Darker, larger backing box for HUD to ensure high contrast
+    cv2.rectangle(overlay, (10, 10), (320, 220), (20, 20, 20), -1)
+    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
 
-    # Postural UI configuration
-    sit_label = "Sitting" if is_sitting else "Standing/Away"
-    sit_color = (0, 255, 0) if not is_sitting else ((0, 140, 255) if is_slouching else (255, 255, 0))
+    font = cv2.FONT_HERSHEY_SIMPLEX
     
-    cv2.putText(frame, f"User Posture: {sit_label}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.55, sit_color, 2)
-    cv2.putText(frame, f"Session Duration: {sitting_time // 60:.0f}m {sitting_time % 60:.0f}s", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    # --- 1. Posture Status LED ---
+    cv2.putText(frame, "Posture:", (20, 40), font, 0.6, (255, 255, 255), 1)
+    if not is_sitting:
+        color = (0, 255, 255) # True Yellow (BGR)
+        status_text = "Standing/Away"
+    elif is_slouching:
+        color = (0, 140, 255) # Orange Warning
+        status_text = "Slouch Warning"
+    else:
+        color = (0, 255, 0) # Green Good
+        status_text = "Good Sitting"
     
-    # Eye Fatigue UI Configuration
-    from config import EYE_STRAIN_THRESHOLD_SEC
-    fatigue_pct = min((eye_strain_time / EYE_STRAIN_THRESHOLD_SEC) * 100, 100)
-    cv2.putText(frame, f"Eye Fatigue Index: {fatigue_pct:.0f}% ({eye_strain_time // 60:.0f}m)", (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (100, 100, 255) if fatigue_pct > 75 else (255, 255, 255), 1)
+    # Draw status LED (filled circle)
+    cv2.circle(frame, (120, 35), 8, color, -1)
+    cv2.putText(frame, status_text, (140, 40), font, 0.55, color, 1)
+
+    # Session Time indicator directly below posture
+    cv2.putText(frame, f"Session: {sitting_time // 60:.0f}m {sitting_time % 60:.0f}s", (20, 70), font, 0.5, (200, 200, 200), 1)
+
+    # --- 2. Eye Strain Status LED ---
+    from config import EYE_STRAIN_LIMIT_SEC
+    fatigue_pct = min((eye_strain_time / EYE_STRAIN_LIMIT_SEC) * 100, 100)
     
-    # Vessel Telemetry
-    v_text = f"{vessel_type} ({water_level:.0f}% | {volume_ml:.0f}mL)" if water_level is not None else f"{vessel_type} (N/A)"
-    cv2.putText(frame, f"Object Status: {v_text}", (20, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-    
-    # Computational Metrics
-    cv2.putText(frame, f"System Loop Speed: {video_fps:.1f} FPS", (20, 185), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+    cv2.putText(frame, "Eye Strain:", (20, 110), font, 0.6, (255, 255, 255), 1)
+    if fatigue_pct < 50:
+        e_color = (0, 255, 0) # Green
+        e_text = "Neutral"
+    elif fatigue_pct < 85:
+        e_color = (0, 255, 255) # Yellow Warning
+        e_text = "Strain Warning"
+    else:
+        e_color = (0, 0, 255) # Red Critical
+        e_text = "Take a Break"
+        
+    cv2.circle(frame, (140, 105), 8, e_color, -1)
+    cv2.putText(frame, f"{e_text} ({fatigue_pct:.0f}%)", (160, 110), font, 0.55, e_color, 1)
+
+    # --- 3. Hydration Status LED ---
+    cv2.putText(frame, "Hydration:", (20, 150), font, 0.6, (255, 255, 255), 1)
+    if water_level is None:
+        w_color = (150, 150, 150) # Gray
+        w_text = "No Vessel"
+    else:
+        if water_level > 60:
+            w_color = (255, 255, 0) # Cyan (Full)
+            w_text = f"Full ({water_level:.0f}%)"
+        elif water_level > 20:
+            w_color = (0, 255, 255) # Yellow
+            w_text = f"Half Empty ({water_level:.0f}%)"
+        else:
+            w_color = (0, 0, 255) # Red Critical
+            w_text = f"Refill Required ({water_level:.0f}%)"
+            
+    cv2.circle(frame, (140, 145), 8, w_color, -1)
+    cv2.putText(frame, w_text, (160, 150), font, 0.55, w_color, 1)
+
+    # --- System Performance ---
+    cv2.putText(frame, f"System Loop: {video_fps:.1f} FPS", (20, 200), font, 0.45, (0, 255, 0), 1)
 
     return frame

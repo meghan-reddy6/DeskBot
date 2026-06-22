@@ -93,16 +93,24 @@ def main():
                                 break
                         continue # Skip accumulator evaluation during hardware warmup
                     else:
-                        if detector.neck_ratio_history and detector.nose_y_history:
-                            detector.baseline_neck_ratio = sum(detector.neck_ratio_history) / len(detector.neck_ratio_history)
-                            detector.baseline_nose_y = sum(detector.nose_y_history) / len(detector.nose_y_history)
-                            detector.calibrated = True
-                            logger.info("Calibration Successful! Posture baselines acquired.")
+                        # Safe division fallbacks for array processing
+                        if len(detector.calib_aspect_ratio) > 10:
+                            detector.base_aspect_ratio = sum(detector.calib_aspect_ratio) / len(detector.calib_aspect_ratio)
+                            detector.base_Sb = sum(detector.calib_Sb) / len(detector.calib_Sb)
+                            detector.base_centroid_y = sum(detector.calib_centroid_y) / len(detector.calib_centroid_y)
+                            detector.base_torso_ratio = sum(detector.calib_torso_ratio) / len(detector.calib_torso_ratio)
+                            detector.base_nose_to_box = sum(detector.calib_nose_to_box) / len(detector.calib_nose_to_box)
                         else:
-                            # Edge case: No human visible in stream during calibration
-                            logger.warning("Nobody detected during calibration. Retrying...")
-                            calibration_start = time.time()
-                            continue
+                            logger.warning("Calibration data sparse! Utilizing structural fallback baselines.")
+                            detector.base_aspect_ratio = 1.2
+                            detector.base_Sb = 150.0
+                            detector.base_centroid_y = config.FRAME_HEIGHT / 2.0
+                            detector.base_torso_ratio = 0.75
+                            detector.base_nose_to_box = 50.0
+
+                        detector.calibrated = True
+                        logger.info("Calibration Successful! Dual-Mode Architecture Locked.")
+                        # Proceed into continuous execution
                             
                 # --- STATE CALCULATION MACHINE ---
                 current_epoch = time.time()
@@ -115,7 +123,7 @@ def main():
                     accumulated_sitting_sec = current_epoch - sitting_epoch
                     
                     # Core Postural Alert Dispatches
-                    if accumulated_sitting_sec > config.SITTING_TIME_THRESHOLD:
+                    if accumulated_sitting_sec > config.MAX_SITTING_TIME_SEC:
                         alert_notifier.send_alert("posture", "Posture Alert", "Prolonged sitting detected. Please stand up!")
                         
                     if metrics["is_slouching"]:
@@ -131,7 +139,7 @@ def main():
                         
                     accumulated_standing_sec = current_epoch - standing_epoch
                     
-                    if accumulated_standing_sec >= config.STAND_RESET_THRESHOLD:
+                    if accumulated_standing_sec >= config.STAND_RESET_THRESHOLD_SEC:
                         if not break_completion_alert_fired:
                             alert_notifier.send_alert(
                                 "break_complete", 
@@ -147,7 +155,7 @@ def main():
                 # --- EYE STRAIN MACHINE ---
                 if metrics["is_sitting"] and metrics["is_gazing_screen"]:
                     accumulated_eye_strain_sec += loop_duration
-                    if accumulated_eye_strain_sec > config.EYE_STRAIN_THRESHOLD_SEC:
+                    if accumulated_eye_strain_sec > config.EYE_STRAIN_LIMIT_SEC:
                         alert_notifier.send_alert("eye_strain", "Eye Fatigue Break", "Screen viewing limit reached.")
                 else:
                     # Natural decay mechanism when looking away from the monitor
@@ -188,19 +196,7 @@ def main():
                         calculated_fps
                     )
                     
-                    # Status Warning Banner Logic
-                    if not metrics["is_sitting"]:
-                        stand_min, stand_sec = divmod(int(accumulated_standing_sec), 60)
-                        target_min, target_sec = divmod(int(config.STAND_RESET_THRESHOLD), 60)
-                        color = (0, 255, 0) if break_completion_alert_fired else (0, 255, 255)
-                        status_str = "BREAK SATISFIED" if break_completion_alert_fired else "STAND BREAK ACTIVE"
-                        cv2.putText(display_frame, f"{status_str}: {stand_min:02d}:{stand_sec:02d}/{target_min:02d}:{target_sec:02d}", 
-                                    (20, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
-
-                    if metrics["is_slouching"]:
-                        cv2.putText(display_frame, "[WARN: POOR POSTURE]", (360, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-                    elif accumulated_eye_strain_sec > (config.EYE_STRAIN_THRESHOLD_SEC * 0.75):
-                        cv2.putText(display_frame, "[WARN: EYE STRAIN RISK]", (340, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2, cv2.LINE_AA)
+                    # Status warnings are now exclusively managed by the hardware LED rendering module in utils.py
 
                     cv2.imshow("DeskBot Workspace Monitor", display_frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'): 

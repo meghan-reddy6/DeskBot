@@ -44,13 +44,19 @@ CUP_CLASS_ID = _get_int("CUP_CLASS_ID", 41)
 SMOOTHING_WINDOW_SIZE = _get_int("SMOOTHING_WINDOW_SIZE", 5)
 POSTURE_CONFIDENCE_THRESHOLD = _get_float("POSTURE_CONFIDENCE_THRESHOLD", 0.40)
 
+# --- Standing Detection Calibration Diagnostics ---
+POSE_SHOULDER_MIN_CONF = _get_float("POSE_SHOULDER_MIN_CONF", 0.45)
+POSE_NOSE_LOST_CONF = _get_float("POSE_NOSE_LOST_CONF", 0.35)
+TORSO_STRAIGHT_THRESHOLD = _get_float("TORSO_STRAIGHT_THRESHOLD", 1.05)
+TOP_FRAME_CLIP_BOUNDARY = _get_float("TOP_FRAME_CLIP_BOUNDARY", 0.35)
+
 # ==========================================
 # Ergonomics & Biomechanical Thresholds
 # ==========================================
-SITTING_TIME_THRESHOLD = _get_float("SITTING_TIME_THRESHOLD", 45 * 60.0)      
-STAND_RESET_THRESHOLD = _get_float("STAND_RESET_THRESHOLD", 10.0)           
+MAX_SITTING_TIME_SEC = _get_float("MAX_SITTING_TIME_MIN", 30.0) * 60.0      
+STAND_RESET_THRESHOLD_SEC = _get_float("STAND_RESET_THRESHOLD_MIN", 2.0) * 60.0           
 SLOUCH_ANGLE_THRESHOLD = _get_float("SLOUCH_ANGLE_THRESHOLD", 145.0)          
-EYE_STRAIN_THRESHOLD_SEC = _get_float("EYE_STRAIN_THRESHOLD_SEC", 20 * 60.0)    
+EYE_STRAIN_LIMIT_SEC = _get_float("EYE_STRAIN_LIMIT_MIN", 20.0) * 60.0    
 
 # ==========================================
 # Hydration Tracking

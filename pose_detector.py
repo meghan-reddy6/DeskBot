@@ -33,13 +33,40 @@ class UnifiedEdgeDetector:
         
         # State tracking and calibration
         self.calibrated = False
-        self.baseline_neck_ratio = 0.0
-        self.baseline_nose_y = 0.0
         
-        self.neck_ratio_history = []
-        self.nose_y_history = []
+        # Dual-Mode Adaptive Calibration Tracking Arrays
+        self.calib_Sb = []
+        self.calib_aspect_ratio = []
+        self.calib_centroid_y = []
+        self.calib_torso_ratio = []
+        self.calib_nose_to_box = []
+        
+        # Stored Structural Constants (locked after calibration)
+        self.base_Sb = 150.0 
+        self.base_aspect_ratio = 1.2
+        self.base_centroid_y = 0.0
+        self.base_torso_ratio = 0.75
+        self.base_nose_to_box = 0.0
+        
         self.water_level_history = []
+        self.locked_target_pos = None  # (cx, cy) tuple for tracking user
+
+        self.frame_counter = 0
         
+        # Instant Saturated Hysteresis (3-frame buffer)
+        self.state_buffers = {
+            "is_sitting": [True, True, True],
+            "is_slouching": [False, False, False],
+            "is_drinking": [False, False, False],
+            "is_gazing_screen": [False, False, False]
+        }
+        self.current_states = {
+            "is_sitting": True,
+            "is_slouching": False,
+            "is_drinking": False,
+            "is_gazing_screen": False
+        }
+
         self.model = None
         self.ort_session = None
         self.input_name = None
@@ -208,6 +235,7 @@ class UnifiedEdgeDetector:
         Executes unified inference and core DeskBot heuristics.
         Returns a structured dictionary of metrics, and optionally the annotated frame if not headless.
         """
+        self.frame_counter += 1
         annotated_frame = frame.copy() if not self.headless else None
         boxes, class_ids, confs, keypoints_list = self._run_inference(frame)
         
@@ -225,17 +253,53 @@ class UnifiedEdgeDetector:
         
         # --- PERSON & POSTURE HEURISTICS ---
         if keypoints_list:
-            # Anchor to the largest skeleton (closest person)
             best_idx = 0
-            max_width = -1
+            
+            # Compute centers for all skeletons (use average of shoulders)
+            centers = []
+            valid_indices = []
             for idx, kpts in enumerate(keypoints_list):
                 if kpts[5][2] > POSTURE_CONFIDENCE_THRESHOLD and kpts[6][2] > POSTURE_CONFIDENCE_THRESHOLD:
-                    w = self.calculate_distance((kpts[5][0], kpts[5][1]), (kpts[6][0], kpts[6][1]))
-                    if w > max_width:
-                        max_width = w
-                        best_idx = idx
-                        
+                    cx = (kpts[5][0] + kpts[6][0]) / 2.0
+                    cy = (kpts[5][1] + kpts[6][1]) / 2.0
+                    centers.append((cx, cy))
+                    valid_indices.append(idx)
+                    
+            if valid_indices:
+                if not self.calibrated or self.locked_target_pos is None:
+                    # Calibration Phase: Lock to the center-most person
+                    # Extract height and width dynamically from the incoming frame numpy array
+                    height, width = frame.shape[:2]
+                    frame_center = (width / 2.0, height / 2.0)
+                    min_dist = float('inf')
+                    for i, (cx, cy) in enumerate(centers):
+                        dist = self.calculate_distance((cx, cy), frame_center)
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_idx = valid_indices[i]
+                    # Set initial lock coordinates
+                    self.locked_target_pos = centers[valid_indices.index(best_idx)]
+                else:
+                    # Proximity tracking to locked target (ignore background people)
+                    min_dist = float('inf')
+                    for i, (cx, cy) in enumerate(centers):
+                        dist = self.calculate_distance((cx, cy), self.locked_target_pos)
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_idx = valid_indices[i]
+                            
+                    # Update locked target position with momentum to prevent jitter
+                    best_cx, best_cy = centers[valid_indices.index(best_idx)]
+                    self.locked_target_pos = (
+                        self.locked_target_pos[0] * 0.8 + best_cx * 0.2,
+                        self.locked_target_pos[1] * 0.8 + best_cy * 0.2
+                    )
+            elif len(keypoints_list) > 0:
+                # Fallback if no shoulders are highly confident
+                best_idx = 0
+                    
             target_kpts = keypoints_list[best_idx]
+            target_box = boxes[best_idx]  # Extract corresponding bounding box
             
             # Dictionary of confident landmarks
             ldm = {}
@@ -245,47 +309,84 @@ class UnifiedEdgeDetector:
                     if not self.headless:
                         cv2.circle(annotated_frame, (int(x), int(y)), 4, (0, 255, 0), -1)
 
-            # Sitting & Slouch Logic
-            if 0 in ldm and 5 in ldm and 6 in ldm:
-                nose_y = float(ldm[0][1])
-                shoulder_width = self.calculate_distance(ldm[5], ldm[6])
-                shoulder_center_y = (ldm[5][1] + ldm[6][1]) / 2.0
-                
-                ear_y = float(ldm[3][1] if 3 in ldm else (ldm[4][1] if 4 in ldm else nose_y))
-                vertical_neck_compression = abs(shoulder_center_y - ear_y)
-                current_neck_ratio = vertical_neck_compression / max(shoulder_width, 1.0)
-                
-                self.neck_ratio_history.append(current_neck_ratio)
-                self.nose_y_history.append(nose_y)
-                if len(self.neck_ratio_history) > SMOOTHING_WINDOW_SIZE:
-                    self.neck_ratio_history.pop(0)
-                    self.nose_y_history.pop(0)
-                
-                smoothed_neck_ratio = float(np.mean(self.neck_ratio_history))
-                smoothed_nose_y = float(np.mean(self.nose_y_history))
+            # Bounding Box Geometry Calculations
+            bx1, by1, bx2, by2 = target_box
+            current_width = float(abs(bx2 - bx1))
+            current_height = float(abs(by2 - by1))
+            current_aspect_ratio = current_height / max(current_width, 1.0)
+            current_centroid_y = by1 + (current_height / 2.0)
 
-                if self.calibrated:
-                    if smoothed_nose_y < (self.baseline_nose_y - (shoulder_width * 0.5)):
-                        metrics["is_sitting"] = False
-                    else:
-                        metrics["is_sitting"] = True
-                        if smoothed_neck_ratio < (self.baseline_neck_ratio * 0.85):
-                            metrics["is_slouching"] = True
+            raw_metrics = {
+                "is_sitting": True,
+                "is_slouching": False,
+                "is_gazing_screen": True,
+                "is_drinking": False
+            }
+
+            conf_L_shoulder = target_kpts[5][2]
+            conf_R_shoulder = target_kpts[6][2]
+            conf_nose = target_kpts[0][2]
+
+            shoulders_visible = (conf_L_shoulder > 0.45 and conf_R_shoulder > 0.45)
+            nose_lost = (conf_nose < 0.30)
+
+            shoulder_center_y = 0.0
+            if shoulders_visible:
+                shoulder_center_y = (target_kpts[5][1] + target_kpts[6][1]) / 2.0
+                current_Sb = self.calculate_distance(target_kpts[5], target_kpts[6])
+
+            # 1. GLOBAL VERTICAL OVERRIDE (ZERO FAILURE)
+            if current_height > (frame.shape[0] * 0.82):
+                raw_metrics["is_sitting"] = False
+            else:
+                if not self.calibrated:
+                    if shoulders_visible and not nose_lost:
+                        self.calib_Sb.append(current_Sb)
+                        self.calib_aspect_ratio.append(current_aspect_ratio)
+                        self.calib_centroid_y.append(current_centroid_y)
+                        
+                        nose_y = target_kpts[0][1]
+                        torso_ratio = abs(shoulder_center_y - nose_y) / max(current_Sb, 1.0)
+                        self.calib_torso_ratio.append(torso_ratio)
+                        self.calib_nose_to_box.append(abs(nose_y - by1) / max(current_height, 1.0))
                 else:
-                    metrics["is_sitting"] = True # Default while calibrating
+                    # 2. HYBRID CLASSIFICATION ENGINE
+                    if shoulders_visible and not nose_lost:
+                        # Mode A (Standard Distance)
+                        nose_y = target_kpts[0][1]
+                        current_torso_ratio = abs(shoulder_center_y - nose_y) / max(current_Sb, 1.0)
+                        
+                        if current_torso_ratio > (self.base_torso_ratio * 1.15):
+                            raw_metrics["is_sitting"] = False
+                            
+                        # 4. ACCURATE SLOUCH CONTROLLER
+                        current_nose_to_box_ratio = abs(nose_y - by1) / max(current_height, 1.0)
+                        if raw_metrics["is_sitting"] and current_nose_to_box_ratio > (self.base_nose_to_box * 1.15):
+                            raw_metrics["is_slouching"] = True
+                    else:
+                        # Mode B (Clipping/Close-up Fallback)
+                        upward_shift = self.base_centroid_y - current_centroid_y
+                        if current_aspect_ratio > (self.base_aspect_ratio * 1.30):
+                            raw_metrics["is_sitting"] = False
+                        elif upward_shift > (frame.shape[0] * 0.25):
+                            raw_metrics["is_sitting"] = False
 
-            # Gaze Logic
-            if 0 in ldm:
-                nose_x = ldm[0][0]
-                if abs(nose_x - (FRAME_WIDTH // 2)) < 120:
-                    metrics["is_gazing_screen"] = True
-
-            # Drinking Logic
-            if 0 in ldm:
-                for wrist in [9, 10]:
-                    if wrist in ldm:
-                        if self.calculate_distance(ldm[0], ldm[wrist]) < 75:
-                            metrics["is_drinking"] = True
+            # Trigonometric Face Symmetry Evaluation (Gaze Logic)
+            if 3 in ldm and 4 in ldm and 0 in ldm:
+                dist_left = self.calculate_distance(ldm[0], ldm[3])
+                dist_right = self.calculate_distance(ldm[0], ldm[4])
+                ratio = dist_left / max(dist_right, 0.001)
+                raw_metrics["is_gazing_screen"] = (0.60 < ratio < 1.66)
+            else:
+                raw_metrics["is_gazing_screen"] = True 
+        else:
+            # If no person bounding box is detected at all
+            raw_metrics = {
+                "is_sitting": False, # Instant Away/Standing
+                "is_slouching": False,
+                "is_gazing_screen": False,
+                "is_drinking": False
+            }
 
         # --- VESSEL HEURISTICS ---
         best_vessel_box = None
@@ -300,7 +401,44 @@ class UnifiedEdgeDetector:
                     best_vessel_conf = conf
                     best_vessel_box = box
                     vessel_cls = "Water Bottle" if c_id == BOTTLE_CLASS_ID else "Cup/Mug"
-                    
+
+        if keypoints_list:
+            # 4. Vessel-Bounded Drinking Guard
+            if 0 in ldm and best_vessel_box:
+                vessel_cx = (best_vessel_box[0] + best_vessel_box[2]) / 2.0
+                vessel_cy = (best_vessel_box[1] + best_vessel_box[3]) / 2.0
+                for wrist in [9, 10]:
+                    if wrist in ldm:
+                        dist_nose_wrist = self.calculate_distance(ldm[0], ldm[wrist])
+                        dist_wrist_vessel = self.calculate_distance(ldm[wrist], (vessel_cx, vessel_cy))
+                        
+                        if dist_nose_wrist < (self.base_Sb * 0.45) and dist_wrist_vessel < (self.base_Sb * 0.5):
+                            raw_metrics["is_drinking"] = True
+                            break
+
+            # 3. ABSOLUTE SITTING RECLAMATION
+            if (conf_nose > 0.60 and conf_L_shoulder > 0.60 and conf_R_shoulder > 0.60):
+                if shoulder_center_y > (frame.shape[0] * 0.45):
+                    raw_metrics["is_sitting"] = True
+
+        # 3. Instant Saturated Hysteresis (3-frame buffer)
+        for state, raw_flag in raw_metrics.items():
+            buf = self.state_buffers[state]
+            buf.append(raw_flag)
+            if len(buf) > 3:
+                buf.pop(0)
+                
+            if all(val == True for val in buf):
+                self.current_states[state] = True
+            elif all(val == False for val in buf):
+                self.current_states[state] = False
+                
+        # Transfer to final metrics payload
+        metrics["is_sitting"] = self.current_states["is_sitting"]
+        metrics["is_slouching"] = self.current_states["is_slouching"]
+        metrics["is_drinking"] = self.current_states["is_drinking"]
+        metrics["is_gazing_screen"] = self.current_states["is_gazing_screen"]
+
         if best_vessel_box:
             metrics["vessel_detected"] = True
             metrics["vessel_type"] = vessel_cls
@@ -315,43 +453,41 @@ class UnifiedEdgeDetector:
         return metrics, annotated_frame
 
 # ==========================================
-# Mock Execution Wrapper
+# Diagnostic Evaluation Wrapper
 # ==========================================
 if __name__ == "__main__":
-    print("Initializing mock execution of UnifiedEdgeDetector...")
+    import cv2
+    import time
+    print("=" * 60)
+    print("POSE DETECTOR DIAGNOSTIC MODE")
+    print("=" * 60)
+    print("STEP 1: Sit normally and look at your terminal. Note down your 'Torso Ratio' value.")
+    print("STEP 2: Stand up normally (or close up). Note down your 'Torso Ratio' and 'Shoulder Center Y' values.")
+    print("-" * 60)
+    print("HOW TO TUNE YOUR CONFIG.PY:")
+    print("-> If you are standing but Torso Ratio < 1.05, you need to lower TORSO_STRAIGHT_THRESHOLD below your standing Torso Ratio.")
+    print("-> If your head clips off screen when standing, ensure your 'Shoulder Center Y' is LESS THAN 'Frame Height Limit'. If not, increase TOP_FRAME_CLIP_BOUNDARY (e.g., to 0.40).")
+    print("=" * 60)
+    print("Starting live camera feed in 3 seconds...")
+    time.sleep(3)
+
+    detector = UnifiedEdgeDetector(backend="PYTORCH", headless=False)
+    # Simulate calibration baseline so math matches production constraints
+    detector.calibrated_Sb = 150.0 
+    detector.calibrated = True # Force into active calculation state
     
-    # Create a dummy noisy image frame
-    dummy_frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-    
-    # Test 1: PyTorch Backend
-    try:
-        print("\n--- Testing PYTORCH Backend ---")
-        import os
-        # Fallback to yolov8n.pt if pose model isn't available for mock tests
-        pt_model = "yolov8n-pose.pt" if os.path.exists("yolov8n-pose.pt") else "yolov8n.pt"
+    cap = cv2.VideoCapture(0)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
         
-        detector_pt = UnifiedEdgeDetector(backend="PYTORCH", model_path=pt_model, headless=True)
-        start = time.time()
-        metrics_pt, _ = detector_pt.process_frame(dummy_frame)
-        duration_pt = time.time() - start
-        print(f"Metrics Output: {metrics_pt}")
-        print(f"Inference Time: {duration_pt:.4f}s")
-    except Exception as e:
-        print(f"PyTorch backend test failed: {e}")
-        
-    # Test 2: ONNX Backend
-    try:
-        print("\n--- Testing ONNX Backend ---")
-        onnx_model = "yolov8n-pose.onnx"
-        if os.path.exists(onnx_model):
-            # Install onnxruntime via: pip install onnxruntime
-            detector_onnx = UnifiedEdgeDetector(backend="ONNX", model_path=onnx_model, headless=True)
-            start = time.time()
-            metrics_onnx, _ = detector_onnx.process_frame(dummy_frame)
-            duration_onnx = time.time() - start
-            print(f"Metrics Output: {metrics_onnx}")
-            print(f"Inference Time: {duration_onnx:.4f}s")
-        else:
-            print(f"Skipping ONNX test: '{onnx_model}' not found locally.")
-    except Exception as e:
-        print(f"ONNX backend test failed: {e}")
+        metrics, annotated = detector.process_frame(frame)
+        if annotated is not None:
+            cv2.imshow("Diagnostic Feed", annotated)
+            
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+            
+    cap.release()
+    cv2.destroyAllWindows()
