@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # PROFILE: Local Development (Windows/Ubuntu)
+  # ==========================================
+  deskbot-dev:
+    build: .
+    profiles: ["dev"]
+    container_name: deskbot_dev
+    environment:
+      # Inject 12-factor configuration logic to config.py
+      - RUN_MODE=GUI
+      - CAMERA_TYPE=WEBCAM
+      - INFERENCE_BACKEND=PYTORCH
+      - CAMERA_INDEX=0
+      - ENABLE_VOICE_ALERTS=False # Usually requires host-level audio mapping to work securely
+    devices:
+      # Hardware passthrough for standard USB webcams
+      - "/dev/video0:/dev/video0"
+    volumes:
+      # Mount historical telemetry store
+      - deskbot_data:/app/data
+      # Mount local codebase for hot-reloading capability during dev
+      - ./:/app 
+    # Network host mode required on Linux for X11/GUI forwarding
+    network_mode: "host" 
+
+  # ==========================================
+  # PROFILE: Production Edge (Rubik Pi / Qualcomm)
+  # ==========================================
+  deskbot-edge:
+    build: .
+    profiles: ["edge"]
+    container_name: deskbot_rubik
+    restart: unless-stopped
+    environment:
+      # Heavily optimized execution flags for Edge targets
+      - RUN_MODE=HEADLESS
+      - CAMERA_TYPE=GSTREAMER
+      - INFERENCE_BACKEND=ONNX
+      - CAMERA_INDEX=0
+      - ENABLE_VOICE_ALERTS=False
+      - ENABLE_DESKTOP_ALERTS=False # No desktop GUI environment available on raw edge boards
+    devices:
+      # Hardware passthrough for CSI/MIPI Cameras
+      - "/dev/video0:/dev/video0"
+      # Depending on the Qualcomm BSP, additional memory allocation nodes might be needed:
+      # - "/dev/ion:/dev/ion"
+      # - "/dev/dmabuf_heaps:/dev/dmabuf_heaps"
+    volumes:
+      # Persist historical data safely outside the container lifecycle
+      - deskbot_data:/app/data
+
+volumes:
+  # Create a named volume managed by Docker
+  deskbot_data:
+    name: deskbot_metrics_volume

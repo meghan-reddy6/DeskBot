@@ -1,37 +1,118 @@
 import cv2
 import sqlite3
+import threading
+import queue
+import logging
 
-def setup_telemetry_db():
-    """Initializes local SQLite server instance directly on the board file system."""
-    conn = sqlite3.connect('deskbot_metrics.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS system_logs (
-            entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            sitting_duration_seconds REAL,
-            slouch_status INTEGER,
-            eye_strain_duration_seconds REAL,
-            fluid_level_percent REAL,
-            fluid_volume_ml REAL
+logger = logging.getLogger(__name__)
+
+class TelemetryLogger:
+    """
+    Asynchronous SQLite Worker.
+    Maintains an isolated thread handling batched DB writes to prevent I/O blocking
+    and minimize flash storage wear on embedded devices.
+    """
+    def __init__(self, db_path='deskbot_metrics.db'):
+        self.db_path = db_path
+        # Thread-safe queue for metrics payload buffering
+        self.telemetry_queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.worker_thread = None
+        
+        self._setup_db()
+        
+    def _setup_db(self):
+        """Initializes local SQLite server instance table structure."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS system_logs (
+                        entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        sitting_duration_seconds REAL,
+                        slouch_status INTEGER,
+                        eye_strain_duration_seconds REAL,
+                        fluid_level_percent REAL,
+                        fluid_volume_ml REAL
+                    )
+                ''')
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to initialize telemetry database: {e}")
+
+    def start(self):
+        """Starts the background worker daemon."""
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            return
+        self.stop_event.clear()
+        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.worker_thread.start()
+        logger.info("Asynchronous telemetry logger started.")
+
+    def stop(self):
+        """Safely stops the background worker and drains any pending DB writes."""
+        self.stop_event.set()
+        if self.worker_thread is not None:
+            self.worker_thread.join(timeout=3.0)
+        logger.info("Asynchronous telemetry logger stopped.")
+
+    def log(self, sitting_time, slouching_flag, eye_strain_time, water_pct, fluid_ml):
+        """
+        Non-blocking function called by the main loop to drop a metric snapshot.
+        If the queue backs up, it drops frames rather than blocking the camera.
+        """
+        payload = (
+            sitting_time, 
+            1 if slouching_flag else 0, 
+            eye_strain_time, 
+            water_pct if water_pct is not None else 0.0, 
+            fluid_ml
         )
-    ''')
-    conn.commit()
-    conn.close()
+        try:
+            # We don't wait; if the queue is overloaded, we discard the telemetry point.
+            self.telemetry_queue.put_nowait(payload)
+        except queue.Full:
+            pass
 
-def append_telemetry(sitting_time, slouching_flag, eye_strain_time, water_pct, fluid_ml):
-    """Saves records safely completely offline."""
-    try:
-        conn = sqlite3.connect('deskbot_metrics.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO system_logs (sitting_duration_seconds, slouch_status, eye_strain_duration_seconds, fluid_level_percent, fluid_volume_ml)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (sitting_time, 1 if slouching_flag else 0, eye_strain_time, water_pct if water_pct else 0.0, fluid_ml))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Database sync fault occurred: {e}")
+    def _worker_loop(self):
+        """Background daemon loop that holds a single open connection and batches writes."""
+        try:
+            # Single open connection per thread to minimize I/O overhead
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            while not self.stop_event.is_set():
+                batch = []
+                try:
+                    # Block until at least one item is available
+                    item = self.telemetry_queue.get(timeout=1.0)
+                    batch.append(item)
+                    
+                    # Drain the queue to batch writes if items built up behind
+                    while not self.telemetry_queue.empty():
+                        batch.append(self.telemetry_queue.get_nowait())
+                except queue.Empty:
+                    continue
+                
+                if batch:
+                    cursor.executemany('''
+                        INSERT INTO system_logs (
+                            sitting_duration_seconds, 
+                            slouch_status, 
+                            eye_strain_duration_seconds, 
+                            fluid_level_percent, 
+                            fluid_volume_ml
+                        ) VALUES (?, ?, ?, ?, ?)
+                    ''', batch)
+                    conn.commit()
+                    
+        except Exception as e:
+            logger.error(f"Telemetry worker thread crashed: {e}")
+        finally:
+            if 'conn' in locals():
+                conn.close()
+
 
 def draw_dashboard(frame, sitting_time, eye_strain_time, is_sitting, is_slouching, vessel_type, water_level, volume_ml, video_fps):
     """Renders the workspace analytics layer onto the display frame."""

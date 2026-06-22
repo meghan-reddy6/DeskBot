@@ -1,213 +1,224 @@
-import cv2
 import time
-import threading
-import numpy as np
+import cv2
+import logging
+
 import config
+from camera_stream import CrossPlatformCapture
 from pose_detector import UnifiedEdgeDetector
 from hydration_manager import HydrationManager
 from notification_manager import NotificationManager
-from utils import setup_telemetry_db, append_telemetry, draw_dashboard
+from utils import TelemetryLogger, draw_dashboard
 
-# Memory Boundary Locks
-thread_lock = threading.Lock()
-frame_for_ai = None
-shared_overlay_elements = []
-
-network_telemetry = {
-    "is_sitting": False,
-    "is_slouching": False,
-    "is_drinking": False,
-    "is_gazing_screen": False,
-    "vessel_detected": False,
-    "vessel_type": "None",
-    "water_level_pct": None,
-    "current_volume_ml": 0.0
-}
-
-def asynchronous_inference_worker():
-    """Independent inference thread. Frees up camera display thread entirely."""
-    global frame_for_ai, shared_overlay_elements, network_telemetry
-    engine = UnifiedEdgeDetector()
-    
-    calibration_ratios = []
-    calibration_noses = []
-    calibration_start = time.time()
-    print("[DeskBot] Calibrating posture framework... Please sit completely straight up.")
-    
-    while True:
-        local_frame = None
-        with thread_lock:
-            if frame_for_ai is not None:
-                local_frame = frame_for_ai.copy()
-                
-        if local_frame is not None:
-            (sit, slouch, drink, gaze, v_det, v_type, pct, ml, overlays) = engine.process_frame(local_frame)
-            
-            if time.time() - calibration_start < 4.0:
-                if engine.neck_ratio_history and engine.nose_y_history:
-                    calibration_ratios.append(engine.neck_ratio_history[-1])
-                    calibration_noses.append(engine.nose_y_history[-1])
-                
-                with thread_lock:
-                    shared_overlay_elements = overlays
-                    network_telemetry["is_sitting"] = True
-                    network_telemetry["is_slouching"] = False
-                continue
-                
-            elif not engine.calibrated and calibration_ratios:
-                engine.baseline_neck_ratio = float(np.mean(calibration_ratios))
-                engine.baseline_nose_y = float(np.mean(calibration_noses))
-                engine.calibrated = True
-                print("[DeskBot] Calibration Successful!")
-
-            with thread_lock:
-                shared_overlay_elements = overlays
-                network_telemetry["is_sitting"] = sit
-                network_telemetry["is_slouching"] = slouch
-                network_telemetry["is_drinking"] = drink
-                network_telemetry["is_gazing_screen"] = gaze
-                network_telemetry["vessel_detected"] = v_det
-                network_telemetry["vessel_type"] = v_type
-                network_telemetry["water_level_pct"] = pct
-                network_telemetry["current_volume_ml"] = ml
-                
-        time.sleep(config.AI_INFERENCE_INTERVAL)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
 def main():
-    global frame_for_ai, shared_overlay_elements, network_telemetry
-    print("[DeskBot Daemon] Initialization sequence started...")
+    logger.info("Initializing DeskBot Daemon...")
     
-    setup_telemetry_db()
-    video_capture = cv2.VideoCapture(config.CAMERA_INDEX)
-    video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
-    video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
+    # 1. Environment & Config Assessment
+    is_headless = (config.RUN_MODE == "HEADLESS")
+    logger.info(f"Running in {config.RUN_MODE} mode with {config.INFERENCE_BACKEND} backend.")
+    logger.info(f"Camera Pipeline: {config.CAMERA_TYPE}")
     
+    # Instantiate modular managers
+    telemetry = TelemetryLogger('deskbot_metrics.db')
     alert_notifier = NotificationManager()
     hydration_handler = HydrationManager(alert_notifier)
     
-    background_processor = threading.Thread(target=asynchronous_inference_worker, daemon=True)
-    background_processor.start()
+    # Assign correct model payload based on runtime configurations
+    model_path = config.YOLO_ONNX_MODEL if config.INFERENCE_BACKEND == "ONNX" else config.YOLO_POSE_MODEL
     
-    # Core Engine Core Timestamps
-    sitting_epoch = time.time()
-    standing_epoch = None
+    detector = UnifiedEdgeDetector(
+        backend=config.INFERENCE_BACKEND, 
+        model_path=model_path, 
+        headless=is_headless
+    )
     
-    # State Duration Accumulators
-    accumulated_sitting_sec = 0
-    accumulated_standing_sec = 0
-    accumulated_eye_strain_sec = 0
-    
-    # Condition Latch Flags
-    is_currently_slouching = False
-    break_completion_alert_fired = False
-    
-    previous_frame_timestamp = time.time()
-    last_db_commit_timestamp = time.time()
-    
-    while video_capture.isOpened():
-        success, current_frame = video_capture.read()
-        if not success: 
-            break
-            
-        loop_duration = time.time() - previous_frame_timestamp
-        previous_frame_timestamp = time.time()
-        current_epoch = time.time()
-
-        with thread_lock:
-            frame_for_ai = current_frame.copy()
-            active_metrics = network_telemetry.copy()
-            local_overlays = list(shared_overlay_elements)
-
-        # 1. Render base model overlay landmarks (Skeletons/Bounding Boxes)
-        for item in local_overlays:
-            if item[0] == "circle":
-                cv2.circle(current_frame, item[1], item[2], item[3], item[4])
-            elif item[0] == "rect":
-                cv2.rectangle(current_frame, item[1], item[2], item[3], item[4])
-
-        # 2. Dual Accumulator Posture State Engine
-        if active_metrics["is_sitting"]:
+    # 2. Lifecycle Orchestration
+    # Using robust try/finally and context managers to guarantee clean shutdown
+    try:
+        telemetry.start()
+        
+        # CrossPlatformCapture manages its own background thread and cleans up on __exit__
+        with CrossPlatformCapture(camera_index=config.CAMERA_INDEX, 
+                                  width=config.FRAME_WIDTH, 
+                                  height=config.FRAME_HEIGHT) as camera:
+                                  
+            # State Trackers
+            sitting_epoch = time.time()
             standing_epoch = None
+            accumulated_sitting_sec = 0
             accumulated_standing_sec = 0
+            accumulated_eye_strain_sec = 0
+            
+            is_currently_slouching = False
             break_completion_alert_fired = False
             
-            accumulated_sitting_sec = current_epoch - sitting_epoch
+            last_db_commit_timestamp = time.time()
+            previous_frame_timestamp = time.time()
             
-            if accumulated_sitting_sec > config.SITTING_TIME_THRESHOLD:
-                alert_notifier.send_alert("posture", "Posture Alert", "Prolonged sitting detected. Please stand up!")
-                
-            if active_metrics["is_slouching"]:
-                if not is_currently_slouching:
-                    alert_notifier.send_alert("slouch", "Ergonomics Check", "Slouching behavior detected.")
-                    is_currently_slouching = True
-            else:
-                is_currently_slouching = False
-        else:
-            is_currently_slouching = False
-            if standing_epoch is None: 
-                standing_epoch = current_epoch
-                
-            accumulated_standing_sec = current_epoch - standing_epoch
+            # Calibration Variables
+            calibration_start = time.time()
+            calibration_duration = 4.0
             
-            if accumulated_standing_sec >= config.STAND_RESET_THRESHOLD:
-                if not break_completion_alert_fired:
-                    alert_notifier.send_alert(
-                        "break_complete", 
-                        "Break Completed", 
-                        "Excellent job! You have stood long enough. You can sit down now."
+            logger.info("Starting continuous inference loop...")
+            if not is_headless:
+                logger.info("Press 'q' in the OpenCV window to exit gracefully.")
+            
+            while True:
+                # Ingest frames synchronously from the bounceless background thread queue
+                ret, raw_frame = camera.read()
+                if not ret:
+                    logger.warning("Stream disconnected or frame dropped.")
+                    time.sleep(0.1)
+                    continue
+                    
+                loop_start = time.time()
+                loop_duration = loop_start - previous_frame_timestamp
+                previous_frame_timestamp = loop_start
+                
+                # --- INFERENCE PIPELINE ---
+                # Detector guarantees uniformly structured metrics dictionaries
+                metrics, annotated_frame = detector.process_frame(raw_frame)
+                
+                # --- STARTUP CALIBRATION PHASE ---
+                if not detector.calibrated:
+                    if time.time() - calibration_start < calibration_duration:
+                        # Provide visual feedback during calibration if running via GUI
+                        if not is_headless and annotated_frame is not None:
+                            cv2.putText(annotated_frame, "CALIBRATING POSTURE: SIT STRAIGHT", (50, 50), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                            cv2.imshow("DeskBot Workspace Monitor", annotated_frame)
+                            if cv2.waitKey(1) & 0xFF == ord('q'):
+                                break
+                        continue # Skip accumulator evaluation during hardware warmup
+                    else:
+                        if detector.neck_ratio_history and detector.nose_y_history:
+                            detector.baseline_neck_ratio = sum(detector.neck_ratio_history) / len(detector.neck_ratio_history)
+                            detector.baseline_nose_y = sum(detector.nose_y_history) / len(detector.nose_y_history)
+                            detector.calibrated = True
+                            logger.info("Calibration Successful! Posture baselines acquired.")
+                        else:
+                            # Edge case: No human visible in stream during calibration
+                            logger.warning("Nobody detected during calibration. Retrying...")
+                            calibration_start = time.time()
+                            continue
+                            
+                # --- STATE CALCULATION MACHINE ---
+                current_epoch = time.time()
+                
+                if metrics["is_sitting"]:
+                    standing_epoch = None
+                    accumulated_standing_sec = 0
+                    break_completion_alert_fired = False
+                    
+                    accumulated_sitting_sec = current_epoch - sitting_epoch
+                    
+                    # Core Postural Alert Dispatches
+                    if accumulated_sitting_sec > config.SITTING_TIME_THRESHOLD:
+                        alert_notifier.send_alert("posture", "Posture Alert", "Prolonged sitting detected. Please stand up!")
+                        
+                    if metrics["is_slouching"]:
+                        if not is_currently_slouching:
+                            alert_notifier.send_alert("slouch", "Ergonomics Check", "Slouching behavior detected.")
+                            is_currently_slouching = True
+                    else:
+                        is_currently_slouching = False
+                else:
+                    is_currently_slouching = False
+                    if standing_epoch is None: 
+                        standing_epoch = current_epoch
+                        
+                    accumulated_standing_sec = current_epoch - standing_epoch
+                    
+                    if accumulated_standing_sec >= config.STAND_RESET_THRESHOLD:
+                        if not break_completion_alert_fired:
+                            alert_notifier.send_alert(
+                                "break_complete", 
+                                "Break Completed", 
+                                "Excellent job! You have stood long enough. You can sit down now."
+                            )
+                            break_completion_alert_fired = True
+                        
+                        # Once reset condition satisfied, wipe accumulated sitting fatigue
+                        sitting_epoch = current_epoch
+                        accumulated_sitting_sec = 0
+
+                # --- EYE STRAIN MACHINE ---
+                if metrics["is_sitting"] and metrics["is_gazing_screen"]:
+                    accumulated_eye_strain_sec += loop_duration
+                    if accumulated_eye_strain_sec > config.EYE_STRAIN_THRESHOLD_SEC:
+                        alert_notifier.send_alert("eye_strain", "Eye Fatigue Break", "Screen viewing limit reached.")
+                else:
+                    # Natural decay mechanism when looking away from the monitor
+                    accumulated_eye_strain_sec = max(0, accumulated_eye_strain_sec - (loop_duration * 1.5))
+
+                # --- HYDRATION DISPATCH ---
+                hydration_handler.update(
+                    metrics["is_drinking"], 
+                    metrics["vessel_detected"], 
+                    metrics["water_level_pct"]
+                )
+
+                # --- ASYNC TELEMETRY PUSH ---
+                if current_epoch - last_db_commit_timestamp > 5.0:
+                    # Non-blocking enqueue. Worker batch-inserts it onto flash later.
+                    telemetry.log(
+                        accumulated_sitting_sec,
+                        metrics["is_slouching"],
+                        accumulated_eye_strain_sec,
+                        metrics["water_level_pct"],
+                        metrics["current_volume_ml"]
                     )
-                    break_completion_alert_fired = True
-                
-                sitting_epoch = current_epoch
-                accumulated_sitting_sec = 0
+                    last_db_commit_timestamp = current_epoch
 
-        # 3. Eye Strain Monitoring Engine
-        if active_metrics["is_sitting"] and active_metrics["is_gazing_screen"]:
-            accumulated_eye_strain_sec += loop_duration
-            if accumulated_eye_strain_sec > config.EYE_STRAIN_THRESHOLD_SEC:
-                alert_notifier.send_alert("eye_strain", "Eye Fatigue Break", "Screen viewing limit reached.")
-        else:
-            accumulated_eye_strain_sec = max(0, accumulated_eye_strain_sec - (loop_duration * 1.5))
+                # --- HEADLESS / GUI EXECUTION BRANCHING ---
+                if not is_headless and annotated_frame is not None:
+                    # 3. Compute overlay vectors and render to system compositor
+                    calculated_fps = 1.0 / loop_duration if loop_duration > 0 else 0.0
+                    display_frame = draw_dashboard(
+                        annotated_frame, 
+                        accumulated_sitting_sec, 
+                        accumulated_eye_strain_sec,
+                        metrics["is_sitting"], 
+                        metrics["is_slouching"],
+                        metrics["vessel_type"], 
+                        metrics["water_level_pct"],
+                        metrics["current_volume_ml"], 
+                        calculated_fps
+                    )
+                    
+                    # Status Warning Banner Logic
+                    if not metrics["is_sitting"]:
+                        stand_min, stand_sec = divmod(int(accumulated_standing_sec), 60)
+                        target_min, target_sec = divmod(int(config.STAND_RESET_THRESHOLD), 60)
+                        color = (0, 255, 0) if break_completion_alert_fired else (0, 255, 255)
+                        status_str = "BREAK SATISFIED" if break_completion_alert_fired else "STAND BREAK ACTIVE"
+                        cv2.putText(display_frame, f"{status_str}: {stand_min:02d}:{stand_sec:02d}/{target_min:02d}:{target_sec:02d}", 
+                                    (20, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
 
-        hydration_handler.update(active_metrics["is_drinking"], active_metrics["vessel_detected"], active_metrics["water_level_pct"])
+                    if metrics["is_slouching"]:
+                        cv2.putText(display_frame, "[WARN: POOR POSTURE]", (360, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+                    elif accumulated_eye_strain_sec > (config.EYE_STRAIN_THRESHOLD_SEC * 0.75):
+                        cv2.putText(display_frame, "[WARN: EYE STRAIN RISK]", (340, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2, cv2.LINE_AA)
 
-        # 4. Telemetry Log Handler
-        if current_epoch - last_db_commit_timestamp > 5.0:
-            append_telemetry(accumulated_sitting_sec, active_metrics["is_slouching"], accumulated_eye_strain_sec, active_metrics["water_level_pct"], active_metrics["current_volume_ml"])
-            last_db_commit_timestamp = current_epoch
+                    cv2.imshow("DeskBot Workspace Monitor", display_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'): 
+                        logger.info("Keyboard interrupt received via GUI.")
+                        break
 
-        # 5. Clean Dashboard Generator Layer (Passes timers natively to avoid layout collisions)
-        calculated_fps = 1.0 / loop_duration if loop_duration > 0 else 0.0
-        current_frame = draw_dashboard(
-            current_frame, accumulated_sitting_sec, accumulated_eye_strain_sec,
-            active_metrics["is_sitting"], active_metrics["is_slouching"],
-            active_metrics["vessel_type"], active_metrics["water_level_pct"],
-            active_metrics["current_volume_ml"], calculated_fps
-        )
-
-        # 6. Integrated Non-Overlapping Status Information Banners (Safe Corner Placements)
-        if not active_metrics["is_sitting"]:
-            stand_min, stand_sec = divmod(int(accumulated_standing_sec), 60)
-            target_min, target_sec = divmod(int(config.STAND_RESET_THRESHOLD), 60)
-            color = (0, 255, 0) if break_completion_alert_fired else (0, 255, 255)
-            status_str = "BREAK SATISFIED" if break_completion_alert_fired else "STAND BREAK ACTIVE"
-            
-            # Positioned lower left safely below standard header metrics panel
-            cv2.putText(current_frame, f"{status_str}: {stand_min:02d}:{stand_sec:02d}/{target_min:02d}:{target_sec:02d}", (20, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
-
-        # Bottom right anchoring for ergonomics alert indicators
-        if active_metrics["is_slouching"]:
-            cv2.putText(current_frame, "[WARN: POOR POSTURE]", (360, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-        elif accumulated_eye_strain_sec > (config.EYE_STRAIN_THRESHOLD_SEC * 0.75):
-            cv2.putText(current_frame, "[WARN: EYE STRAIN RISK]", (340, 420), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2, cv2.LINE_AA)
-
-        cv2.imshow("DeskBot Workspace Monitor", current_frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'): 
-            break
-
-    video_capture.release()
-    cv2.destroyAllWindows()
-    alert_notifier.shutdown()
+    except KeyboardInterrupt:
+        logger.info("Shutdown signal received via SIGINT/Ctrl+C.")
+    except Exception as e:
+        logger.error(f"Fatal anomaly in core execution loop: {e}", exc_info=True)
+    finally:
+        # Guarantee memory release and port cleanup regardless of execution success
+        logger.info("Initiating graceful shutdown orchestration...")
+        telemetry.stop()
+        alert_notifier.shutdown()
+        if not is_headless:
+            cv2.destroyAllWindows()
+        logger.info("Daemon shutdown complete. Resources cleanly released.")
 
 if __name__ == "__main__":
     main()
